@@ -43,6 +43,10 @@
 #define ASYNTH_BUILD_ID "b:unknown"
 #endif
 
+/* ---------------------------------------------------------------------------
+ * GPIO device-tree specs
+ * ---------------------------------------------------------------------------
+ */
 const struct gpio_dt_spec right_led = GPIO_DT_SPEC_GET(DT_NODELABEL(right_button_led), gpios);
 const struct gpio_dt_spec left_led = GPIO_DT_SPEC_GET(DT_NODELABEL(left_button_led), gpios);
 const struct gpio_dt_spec right_button = GPIO_DT_SPEC_GET(DT_NODELABEL(right_button), gpios);
@@ -54,6 +58,10 @@ const struct gpio_dt_spec trigger_1 = GPIO_DT_SPEC_GET(DT_NODELABEL(trigger_1), 
 const struct gpio_dt_spec trigger_2 = GPIO_DT_SPEC_GET(DT_NODELABEL(trigger_2), gpios);
 const struct device *oled;
 
+/* ---------------------------------------------------------------------------
+ * Compile-time constants
+ * ---------------------------------------------------------------------------
+ */
 #define AOUT_DAC_CHANNEL_ID   1U
 #define AOUT_DAC_RESOLUTION   12U
 #define AOUT_DAC_MAX_VALUE    ((1U << AOUT_DAC_RESOLUTION) - 1U)
@@ -85,6 +93,8 @@ const struct device *oled;
 #define MIDI_PROCESS_BUDGET_NORMAL 96U
 #define DISPLAY_FLUSH_MIN_INTERVAL_MS 20U
 #define NONCRIT_SERVICE_INTERVAL_MS 10U
+#define DISPLAY_FONT_SCAN_MAX_ID 42
+#define CV_BAR_COUNT 4
 
 #if defined(CONFIG_ASYNTH_TIMING_DIAG)
 #define ASYNTH_TIMING_DIAG_LOG_PERIOD_MS 5000U
@@ -148,7 +158,10 @@ const struct device *oled;
 
 #define CUE_SETTINGS_KEY_CURRENT_VALUE       "asynth/cue/current_value"
 
-/* OSC message paths */
+/* ---------------------------------------------------------------------------
+ * OSC message paths
+ * ---------------------------------------------------------------------------
+ */
 #define OSC_PATH_CV1                "/cv/1"
 #define OSC_PATH_CV2                "/cv/2"
 #define OSC_PATH_CV3                "/cv/3"
@@ -207,16 +220,23 @@ struct net_menu_settings {
 	uint16_t ip_b3;
 };
 
+/* Forward declarations (functions defined later but called earlier). */
 static int asynth_settings_set(const char *name, size_t len, settings_read_cb read_cb,
-				      void *cb_arg);
+			      void *cb_arg);
 static uint32_t net_cidr_to_mask(uint16_t cidr);
+static void cue_pending_cancel(bool show_status);
+static void app_print_ipv4_status(struct net_if *iface);
+static const struct in_addr *app_network_get_active_ipv4_addr(struct net_if *iface);
 
 static struct settings_handler asynth_settings_handler = {
 	.name = "asynth",
 	.h_set = asynth_settings_set,
 };
 
-/* Global CV settings (to be replaced by menu/settings later). */
+/* ---------------------------------------------------------------------------
+ * Application state
+ * ---------------------------------------------------------------------------
+ */
 static uint16_t cv_sample_period_ms = CV_SAMPLE_PERIOD_DEFAULT_MS;
 static uint16_t cv_hysteresis_permille = CV_HYSTERESIS_DEFAULT_PERMILLE;
 static float cv_hysteresis_norm = 0.01f;
@@ -267,13 +287,15 @@ static bool rot_press_tracking;
 static bool rot_button_was_pressed_last_poll;
 static int8_t rot_encoder_step_accum;
 
+/* ---------------------------------------------------------------------------
+ * CV timer (ISR -> main thread synchronisation)
+ * ---------------------------------------------------------------------------
+ */
 K_SEM_DEFINE(cv_sample_sem, 0, 1);
 static struct k_timer cv_sample_timer;
 static atomic_t cv_sample_pending = ATOMIC_INIT(0);
 static atomic_t cv_timer_tick_count = ATOMIC_INIT(0);
 static atomic_t cv_timer_overrun_count = ATOMIC_INIT(0);
-
-static void cue_pending_cancel(bool show_status);
 
 static void app_cv_sample_timer_cb(struct k_timer *timer)
 {
@@ -296,6 +318,11 @@ static void app_cv_sample_timer_restart(void)
 		      K_MSEC(cv_sample_period_ms),
 		      K_MSEC(cv_sample_period_ms));
 }
+
+/* ---------------------------------------------------------------------------
+ * Cue manager
+ * ---------------------------------------------------------------------------
+ */
 
 static void cue_settings_save_sync(void)
 {
@@ -326,6 +353,11 @@ static void cue_settings_request_save(void)
 	cue_settings_save_sync();
 }
 
+/* ---------------------------------------------------------------------------
+ * Idle indicator
+ * ---------------------------------------------------------------------------
+ */
+
 static void app_idle_set(bool enabled)
 {
 	idle_next_active = enabled;
@@ -335,6 +367,11 @@ static void app_idle_clear_on_press(void)
 {
 	idle_next_active = false;
 }
+
+/* ---------------------------------------------------------------------------
+ * Trigger inputs (IRQ and polling)
+ * ---------------------------------------------------------------------------
+ */
 
 static void trigger_irq_capture(const struct gpio_dt_spec *trigger,
 				      volatile bool *state,
@@ -371,6 +408,11 @@ static void trigger_2_cb(const struct device *port, struct gpio_callback *cb, ui
 
 	trigger_irq_capture(&trigger_2, &trigger_2_prev_state, &trigger_2_changed);
 }
+
+/* ---------------------------------------------------------------------------
+ * OSC helpers
+ * ---------------------------------------------------------------------------
+ */
 
 static bool app_osc_parse_optional_bool(const char *format, tosc_message *msg, bool *value)
 {
@@ -558,9 +600,6 @@ static uint32_t app_net_dhcp_deadline_ms;
 static struct in_addr app_net_last_ipv4_addr;
 static bool app_net_last_ipv4_valid;
 static enum app_net_ip_source app_net_ip_source_hint = APP_NET_IP_SRC_UNKNOWN;
-
-static void app_print_ipv4_status(struct net_if *iface);
-static const struct in_addr *app_network_get_active_ipv4_addr(struct net_if *iface);
 
 static void app_osc_reset_socket(void)
 {
@@ -1032,11 +1071,8 @@ static int app_osc_send_pong(const struct sockaddr_in *remote_addr, socklen_t re
 	char packet[64];
 	int len;
 	int ret;
-	const struct sockaddr_in *target_addr;
+	const struct sockaddr *target_addr;
 	socklen_t target_len;
-
-	ARG_UNUSED(remote_addr);
-	ARG_UNUSED(remote_len);
 
 	if (!app_network_ready_for_tx()) {
 		return 0;
@@ -1047,8 +1083,15 @@ static int app_osc_send_pong(const struct sockaddr_in *remote_addr, socklen_t re
 		return ret;
 	}
 
-	target_addr = &app_osc_remote_addr;
-	target_len = sizeof(app_osc_remote_addr);
+	if ((remote_addr != NULL) && (remote_len >= sizeof(*remote_addr))) {
+		target_addr = (const struct sockaddr *)remote_addr;
+		target_len = remote_len;
+	} else if (app_osc_remote_addr_ready) {
+		target_addr = (const struct sockaddr *)&app_osc_remote_addr;
+		target_len = sizeof(app_osc_remote_addr);
+	} else {
+		return -EINVAL;
+	}
 
 	len = tosc_writeMessage(packet, sizeof(packet), OSC_PATH_PONG, "");
 	if (len < 0) {
@@ -1057,7 +1100,7 @@ static int app_osc_send_pong(const struct sockaddr_in *remote_addr, socklen_t re
 
 	return app_osc_send_packet(packet,
 				   (size_t)len,
-				   (const struct sockaddr *)target_addr,
+				   target_addr,
 				   target_len);
 }
 
@@ -2198,6 +2241,46 @@ static void net_settings_use_defaults(void)
 	printk("MIDICFG[defaults]: note_thru=%u\n", (unsigned int)midi_note_thru);
 }
 
+/* ---------------------------------------------------------------------------
+ * Menu state machine
+ * ---------------------------------------------------------------------------
+ */
+
+/*
+ * Descriptor for a simple uint16_t menu item backed by a settings key.
+ * Used to drive the NET settings items from a table instead of repeating
+ * identical if-else blocks for every field.
+ */
+struct menu_u16_item {
+	uint16_t   *field;
+	uint16_t    max_val;
+	uint16_t    default_val;
+	const char *settings_key;
+	const char *log_label;
+};
+
+/* Ordered to match MENU_ITEM_NET_IP_MODE .. MENU_ITEM_NET_IP_B3. */
+static const struct menu_u16_item menu_net_items[] = {
+	{ &net_cfg.ip_mode,     NET_SETTINGS_IP_MODE_MAX,     NET_SETTINGS_DEFAULT_IP_MODE,  NET_SETTINGS_KEY_IP_MODE,    "IP mode" },
+	{ &net_cfg.target_ip4,  NET_SETTINGS_IP_BYTE_MAX,     NET_SETTINGS_DEFAULT_TARGET_IP4, NET_SETTINGS_KEY_TARGET_IP4, "T IP"    },
+	{ &net_cfg.target_port, NET_SETTINGS_PORT_OFFSET_MAX, NET_SETTINGS_DEFAULT_TARGET_PORT, NET_SETTINGS_KEY_TARGET_PORT, "T port" },
+	{ &net_cfg.device_ip4,  NET_SETTINGS_IP_BYTE_MAX,     NET_SETTINGS_DEFAULT_DEVICE_IP4, NET_SETTINGS_KEY_DEVICE_IP4, "D IP"   },
+	{ &net_cfg.device_port, NET_SETTINGS_PORT_OFFSET_MAX, NET_SETTINGS_DEFAULT_DEVICE_PORT, NET_SETTINGS_KEY_DEVICE_PORT, "D port" },
+	{ &net_cfg.cidr_mask,   NET_SETTINGS_CIDR_MAX,        NET_SETTINGS_DEFAULT_CIDR_MASK, NET_SETTINGS_KEY_CIDR_MASK, "CIDR"   },
+	{ &net_cfg.ip_b1,       NET_SETTINGS_IP_BYTE_MAX,     NET_SETTINGS_DEFAULT_IP_B1,    NET_SETTINGS_KEY_IP_B1,    "IP b1"   },
+	{ &net_cfg.ip_b2,       NET_SETTINGS_IP_BYTE_MAX,     NET_SETTINGS_DEFAULT_IP_B2,    NET_SETTINGS_KEY_IP_B2,    "IP b2"   },
+	{ &net_cfg.ip_b3,       NET_SETTINGS_IP_BYTE_MAX,     NET_SETTINGS_DEFAULT_IP_B3,    NET_SETTINGS_KEY_IP_B3,    "IP b3"   },
+};
+
+static bool menu_get_net_item(uint8_t item, const struct menu_u16_item **out)
+{
+	if ((item >= MENU_ITEM_NET_IP_MODE) && (item <= MENU_ITEM_NET_IP_B3)) {
+		*out = &menu_net_items[item - MENU_ITEM_NET_IP_MODE];
+		return true;
+	}
+	return false;
+}
+
 static uint16_t menu_wrap_u16_step(uint16_t value, uint16_t min_val, uint16_t max_val, int8_t direction)
 {
 	if (direction > 0) {
@@ -2341,12 +2424,8 @@ static void menu_persist_pending_settings(void)
 }
 
 
-/*
-* @brief Initialize led's GPIO
-* @param structure gpio_dt_spec
-* @return 0 on success, log errors otherwise
-*/
-int init_led(const struct gpio_dt_spec *led1)
+/* Configure one LED GPIO from devicetree metadata. */
+static int init_led(const struct gpio_dt_spec *led1)
 {
 	int ret;
 
@@ -2527,8 +2606,7 @@ static void ui_write_status_line(void)
 
 static void ui_apply_button_visual_state(void)
 {
-	/* Visual state inversion removed - buttons no longer show pressed state */
-	/* Keep this function as a no-op for now in case we need it later */
+	/* Reserved for future pressed-state highlight. */
 }
 
 static void ui_enter_menu_mode(void)
@@ -2592,7 +2670,7 @@ static void cue_send_recall(uint16_t cue_value)
 	}
 }
 
-static void printTempCueBlink(uint16_t cue_value, bool visible)
+static void print_temp_cue_blink(uint16_t cue_value, bool visible)
 {
 	if (visible) {
 		asynth_display_print_cue(cue_value);
@@ -2612,8 +2690,7 @@ static void cue_pending_cancel(bool show_status)
 	asynth_display_print_cue(current_cue_value);
 
 	if (show_status) {
-		// time out cancel, do nothing. 
-		//asynth_display_print_msg("Cue cancel");
+		/* Reserved for optional timeout status message. */
 	}
 }
 
@@ -2658,7 +2735,7 @@ static void cue_apply_pending_edit_step(int8_t direction, uint32_t now_ms)
 	cue_pending_visible = true;
 	cue_pending_last_change_ms = now_ms;
 	cue_pending_last_blink_ms = now_ms;
-	printTempCueBlink(cue_pending_value, true);
+	print_temp_cue_blink(cue_pending_value, true);
 }
 
 static bool cue_pending_tick(uint32_t now_ms)
@@ -2675,7 +2752,7 @@ static bool cue_pending_tick(uint32_t now_ms)
 	if ((uint32_t)(now_ms - cue_pending_last_blink_ms) >= CUE_PENDING_BLINK_INTERVAL_MS) {
 		cue_pending_last_blink_ms = now_ms;
 		cue_pending_visible = !cue_pending_visible;
-		printTempCueBlink(cue_pending_value, cue_pending_visible);
+		print_temp_cue_blink(cue_pending_value, cue_pending_visible);
 		return true;
 	}
 
@@ -2724,48 +2801,19 @@ static void menu_apply_edit_step(int8_t direction)
 		adc_settings_save_and_report(ADC_SETTINGS_KEY_HYSTERESIS_PERMILLE,
 						"hyst_permille",
 						cv_hysteresis_permille);
-	} else if (current_menu_item == MENU_ITEM_NET_IP_MODE) {
-		net_cfg.ip_mode = menu_wrap_u16_step(net_cfg.ip_mode, 0U, NET_SETTINGS_IP_MODE_MAX,
-						   direction);
-		net_settings_save_and_report(NET_SETTINGS_KEY_IP_MODE, "IP mode", net_cfg.ip_mode);
-	} else if (current_menu_item == MENU_ITEM_NET_TARGET_IP4) {
-		net_cfg.target_ip4 = menu_wrap_u16_step(net_cfg.target_ip4, 0U, NET_SETTINGS_IP_BYTE_MAX,
-						      direction);
-		net_settings_save_and_report(NET_SETTINGS_KEY_TARGET_IP4, "T IP", net_cfg.target_ip4);
-	} else if (current_menu_item == MENU_ITEM_NET_TARGET_PORT) {
-		net_cfg.target_port = menu_wrap_u16_step(net_cfg.target_port, 0U,
-						NET_SETTINGS_PORT_OFFSET_MAX, direction);
-		net_settings_save_and_report(NET_SETTINGS_KEY_TARGET_PORT, "T port", net_cfg.target_port);
-	} else if (current_menu_item == MENU_ITEM_NET_DEVICE_IP4) {
-		net_cfg.device_ip4 = menu_wrap_u16_step(net_cfg.device_ip4, 0U, NET_SETTINGS_IP_BYTE_MAX,
-						      direction);
-		net_settings_save_and_report(NET_SETTINGS_KEY_DEVICE_IP4, "D IP", net_cfg.device_ip4);
-	} else if (current_menu_item == MENU_ITEM_NET_DEVICE_PORT) {
-		net_cfg.device_port = menu_wrap_u16_step(net_cfg.device_port, 0U,
-						NET_SETTINGS_PORT_OFFSET_MAX, direction);
-		net_settings_save_and_report(NET_SETTINGS_KEY_DEVICE_PORT, "D port", net_cfg.device_port);
-	} else if (current_menu_item == MENU_ITEM_NET_CIDR_MASK) {
-		net_cfg.cidr_mask = menu_wrap_u16_step(net_cfg.cidr_mask, 0U, NET_SETTINGS_CIDR_MAX,
-						      direction);
-		net_settings_save_and_report(NET_SETTINGS_KEY_CIDR_MASK, "CIDR", net_cfg.cidr_mask);
-	} else if (current_menu_item == MENU_ITEM_NET_IP_B1) {
-		net_cfg.ip_b1 = menu_wrap_u16_step(net_cfg.ip_b1, 0U, NET_SETTINGS_IP_BYTE_MAX,
-						  direction);
-		net_settings_save_and_report(NET_SETTINGS_KEY_IP_B1, "IP b1", net_cfg.ip_b1);
-	} else if (current_menu_item == MENU_ITEM_NET_IP_B2) {
-		net_cfg.ip_b2 = menu_wrap_u16_step(net_cfg.ip_b2, 0U, NET_SETTINGS_IP_BYTE_MAX,
-						  direction);
-		net_settings_save_and_report(NET_SETTINGS_KEY_IP_B2, "IP b2", net_cfg.ip_b2);
-	} else if (current_menu_item == MENU_ITEM_NET_IP_B3) {
-		net_cfg.ip_b3 = menu_wrap_u16_step(net_cfg.ip_b3, 0U, NET_SETTINGS_IP_BYTE_MAX,
-						  direction);
-		net_settings_save_and_report(NET_SETTINGS_KEY_IP_B3, "IP b3", net_cfg.ip_b3);
-	} else if (current_menu_item == MENU_ITEM_MIDI_NOTE_THRU) {
+	} else {
+		const struct menu_u16_item *it;
+
+		if (menu_get_net_item(current_menu_item, &it)) {
+			*it->field = menu_wrap_u16_step(*it->field, 0U, it->max_val, direction);
+			net_settings_save_and_report(it->settings_key, it->log_label, *it->field);
+		} else if (current_menu_item == MENU_ITEM_MIDI_NOTE_THRU) {
 		midi_note_thru = menu_wrap_u16_step(midi_note_thru, 0U,
 						   MIDI_SETTINGS_NOTE_THRU_MAX,
 						   direction);
-		midi_settings_apply();
-		midi_settings_save_and_report(midi_note_thru);
+			midi_settings_apply();
+			midi_settings_save_and_report(midi_note_thru);
+		}
 	}
 
 	ui_write_status_line();
@@ -2785,37 +2833,17 @@ static void menu_reset_current_item_to_default(void)
 		adc_settings_save_and_report(ADC_SETTINGS_KEY_HYSTERESIS_PERMILLE,
 						"hyst_permille",
 						cv_hysteresis_permille);
-	} else if (current_menu_item == MENU_ITEM_NET_IP_MODE) {
-		net_cfg.ip_mode = NET_SETTINGS_DEFAULT_IP_MODE;
-		net_settings_save_and_report(NET_SETTINGS_KEY_IP_MODE, "IP mode", net_cfg.ip_mode);
-	} else if (current_menu_item == MENU_ITEM_NET_TARGET_IP4) {
-		net_cfg.target_ip4 = NET_SETTINGS_DEFAULT_TARGET_IP4;
-		net_settings_save_and_report(NET_SETTINGS_KEY_TARGET_IP4, "T IP", net_cfg.target_ip4);
-	} else if (current_menu_item == MENU_ITEM_NET_TARGET_PORT) {
-		net_cfg.target_port = NET_SETTINGS_DEFAULT_TARGET_PORT;
-		net_settings_save_and_report(NET_SETTINGS_KEY_TARGET_PORT, "T port", net_cfg.target_port);
-	} else if (current_menu_item == MENU_ITEM_NET_DEVICE_IP4) {
-		net_cfg.device_ip4 = NET_SETTINGS_DEFAULT_DEVICE_IP4;
-		net_settings_save_and_report(NET_SETTINGS_KEY_DEVICE_IP4, "D IP", net_cfg.device_ip4);
-	} else if (current_menu_item == MENU_ITEM_NET_DEVICE_PORT) {
-		net_cfg.device_port = NET_SETTINGS_DEFAULT_DEVICE_PORT;
-		net_settings_save_and_report(NET_SETTINGS_KEY_DEVICE_PORT, "D port", net_cfg.device_port);
-	} else if (current_menu_item == MENU_ITEM_NET_CIDR_MASK) {
-		net_cfg.cidr_mask = NET_SETTINGS_DEFAULT_CIDR_MASK;
-		net_settings_save_and_report(NET_SETTINGS_KEY_CIDR_MASK, "CIDR", net_cfg.cidr_mask);
-	} else if (current_menu_item == MENU_ITEM_NET_IP_B1) {
-		net_cfg.ip_b1 = NET_SETTINGS_DEFAULT_IP_B1;
-		net_settings_save_and_report(NET_SETTINGS_KEY_IP_B1, "IP b1", net_cfg.ip_b1);
-	} else if (current_menu_item == MENU_ITEM_NET_IP_B2) {
-		net_cfg.ip_b2 = NET_SETTINGS_DEFAULT_IP_B2;
-		net_settings_save_and_report(NET_SETTINGS_KEY_IP_B2, "IP b2", net_cfg.ip_b2);
-	} else if (current_menu_item == MENU_ITEM_NET_IP_B3) {
-		net_cfg.ip_b3 = NET_SETTINGS_DEFAULT_IP_B3;
-		net_settings_save_and_report(NET_SETTINGS_KEY_IP_B3, "IP b3", net_cfg.ip_b3);
-	} else if (current_menu_item == MENU_ITEM_MIDI_NOTE_THRU) {
-		midi_note_thru = 0U;
-		midi_settings_apply();
-		midi_settings_save_and_report(midi_note_thru);
+	} else {
+		const struct menu_u16_item *it;
+
+		if (menu_get_net_item(current_menu_item, &it)) {
+			*it->field = it->default_val;
+			net_settings_save_and_report(it->settings_key, it->log_label, *it->field);
+		} else if (current_menu_item == MENU_ITEM_MIDI_NOTE_THRU) {
+			midi_note_thru = 0U;
+			midi_settings_apply();
+			midi_settings_save_and_report(midi_note_thru);
+		}
 	}
 
 	ui_write_status_line();
@@ -2843,6 +2871,11 @@ static void cue_apply_edit_step(int8_t direction)
 
 	asynth_display_print_cue(current_cue_value);
 }
+
+/* ---------------------------------------------------------------------------
+ * Input processing
+ * ---------------------------------------------------------------------------
+ */
 
 static bool process_button_events(void)
 {
@@ -3059,6 +3092,11 @@ static bool process_trigger_events(void)
 	return ui_dirty;
 }
 
+/* ---------------------------------------------------------------------------
+ * Boot sequence and main loop
+ * ---------------------------------------------------------------------------
+ */
+
 FUNC_NORETURN static void app_fatal_stop(const char *stage, int err)
 {
 	app_boot_mark_error(app_boot_stage, err);
@@ -3076,14 +3114,11 @@ FUNC_NORETURN static void app_fatal_stop(const char *stage, int err)
  */
 int main(void)
 {
-	uint16_t x_res;
-	uint16_t y_res;
-	uint16_t rows;
-	uint8_t ppt;
 	uint8_t font_width;
 	uint8_t font_height;
 	int ret;
 	uint32_t midi_diag_last_log_ms = 0U;
+	uint32_t midi_drops_accum = 0U;
 	uint32_t next_noncrit_service_ms;
 	uint32_t next_display_flush_ms;
 	bool display_flush_pending = false;
@@ -3107,10 +3142,10 @@ int main(void)
 	app_boot_mark(APP_BOOT_STAGE_ENTER_MAIN);
 	printk("APP MAIN START\n");
 
-	// log the current build version in the console for easy reference
+	/* Log build identifier early for field diagnostics. */
 	printk("Asynth2OSC build: %s\n", ASYNTH_BUILD_ID);
 
-	// Initialize top left right buttons leds
+	/* Initialize button LEDs. */
 	ret = init_led(&left_led);
 	if (ret < 0) {
 		printk("WARN: left LED init failed (%d)\n", ret);
@@ -3120,7 +3155,7 @@ int main(void)
 	if (ret < 0) {
 		printk("WARN: right LED init failed (%d)\n", ret);
 	}
-	// turn them off
+	/* Ensure both LEDs start in a known off state. */
 	ret = gpio_pin_toggle_dt(&right_led);
 	if (ret < 0) {
 		printk("WARN: right LED toggle failed (%d)\n", ret);
@@ -3165,7 +3200,7 @@ int main(void)
 		printk("AOUT: ready on DAC1 channel %u\n", (unsigned int)AOUT_DAC_CHANNEL_ID);
 	}
 
-	// Intialize Oled screen
+	/* Initialize OLED screen. */
 	oled = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 	if (!device_is_ready(oled)) {
 		app_fatal_stop("display_not_ready", -ENODEV);
@@ -3191,27 +3226,22 @@ int main(void)
 	cfb_framebuffer_clear(oled, true);
 	display_blanking_off(oled);
 
-	x_res = cfb_get_display_parameter(oled, CFB_DISPLAY_WIDTH);
-	y_res = cfb_get_display_parameter(oled, CFB_DISPLAY_HEIGHT);
-	rows = cfb_get_display_parameter(oled, CFB_DISPLAY_ROWS);
-	ppt = cfb_get_display_parameter(oled, CFB_DISPLAY_PPT);
+	(void)cfb_get_display_parameter(oled, CFB_DISPLAY_WIDTH);
+	(void)cfb_get_display_parameter(oled, CFB_DISPLAY_HEIGHT);
+	(void)cfb_get_display_parameter(oled, CFB_DISPLAY_ROWS);
+	(void)cfb_get_display_parameter(oled, CFB_DISPLAY_PPT);
 
-	// Enumerate the fonts ids
-	for (int idx = 0; idx < 42; idx++) {
+	/* Probe available fonts and keep the last valid one selected. */
+	for (int idx = 0; idx < DISPLAY_FONT_SCAN_MAX_ID; idx++) {
 		if (cfb_get_font_size(oled, idx, &font_width, &font_height)) {
 			break;
 		}
 		cfb_framebuffer_set_font(oled, idx);
 	}
-	// Default font width spacing
+	/* Default font spacing. */
 	cfb_set_kerning(oled, 0);
 
-
-	
-	/*	OLED Screen tests & splash "start up  screen"
-	* 
-	*/
-	//cfb_framebuffer_invert(oled);
+	/* Splash screen. */
 	cfb_framebuffer_set_font(oled, 0);
 	cfb_print(oled, "Asynth2OSC", 0, 0);
 	cfb_print(oled, "RederoTech", 0, 16*1);
@@ -3224,9 +3254,8 @@ int main(void)
 	cfb_framebuffer_finalize(oled);
 	app_boot_mark(APP_BOOT_STAGE_SPLASH_DONE);
 
-	// draw four rectangles for CV level monitoring
-	for (int i = 0; i < 4; i++)
-	{
+	/* Draw CV level bar outlines. */
+	for (int i = 0; i < CV_BAR_COUNT; i++) {
 		struct cfb_position corner1;
 		struct cfb_position corner2;
 
@@ -3238,24 +3267,23 @@ int main(void)
 		cfb_draw_rect(oled, &corner1, &corner2);
 	}
 
-	// Draw text for MIDI and TRIGGERS monitoring
+	/* Draw MIDI/TRIGGER activity header. */
 	cfb_framebuffer_set_font(oled, 0);
 	cfb_set_kerning(oled, 2);
 	cfb_print(oled, " 1MA2", 68, 0);
 	asynth_display_set_a(false);
 
-	// Init center mode hint and button visual states
+	/* Initialize mode hint and cue area. */
 	ui_write_center_mode_hint();
 	ui_write_status_line();
 	asynth_display_print_cue(current_cue_value);
 	ui_apply_button_visual_state();
 
-	// Invert whole display once for proper color scheme
+	/* Invert once to match intended color scheme. */
 	cfb_framebuffer_invert(oled);
 	asynth_cv_reset_display_cache();
 
-	// LEFT RIGHT Prev and Next button design
-	// Permanently invert those areas (white background) to figure left and right button
+	/* Draw and invert Prev/Next areas. */
 	cfb_framebuffer_set_font(oled, 0);
 	cfb_set_kerning(oled, 0);
 	cfb_print(oled, "Next", UI_RIGHT_X, UI_BUTTON_LABEL_Y);
@@ -3278,7 +3306,7 @@ int main(void)
 	}
 	app_boot_mark(APP_BOOT_STAGE_NET_READY);
 	
-	/* Initialize OSC remote address with static IPs for initial testing */
+	/* Initialize OSC remote target from current settings. */
 	ret = app_osc_update_remote_addr();
 	if (ret == 0) {
 		printk("OSC: initial target address configured: %u.%u.%u.%u:%u\n",
@@ -3415,6 +3443,7 @@ int main(void)
 
 		dropped = asynth_midi_take_drop_count();
 		if (dropped != 0U) {
+			midi_drops_accum += dropped;
 			printk("MIDI IN: dropped %u bytes (queue full)\n", (unsigned int)dropped);
 		}
 
@@ -3467,7 +3496,7 @@ int main(void)
 
 			if ((uint32_t)(now_ms - timing_diag_last_log_ms) >= ASYNTH_TIMING_DIAG_LOG_PERIOD_MS) {
 				uint32_t cv_min = (timing_diag_cv_interval_min_ms == UINT32_MAX) ? 0U : timing_diag_cv_interval_min_ms;
-				uint32_t midi_drops = asynth_midi_take_drop_count();
+				uint32_t midi_drops = midi_drops_accum;
 
 				printk("TIMING: mode=%s loop_max=%u ms cv_period=%u ms cv_interval_min=%u ms cv_interval_max=%u ms cv_jitter_max=%u ms cv_samples=%u cv_timer_ticks=%u cv_timer_overruns=%u midi_drops=%u\n",
 				       normal_mode ? "normal" : "menu",
@@ -3486,6 +3515,7 @@ int main(void)
 				timing_diag_cv_interval_min_ms = UINT32_MAX;
 				timing_diag_cv_jitter_max_ms = 0U;
 				timing_diag_cv_samples = 0U;
+				midi_drops_accum = 0U;
 			}
 		}
 #endif
