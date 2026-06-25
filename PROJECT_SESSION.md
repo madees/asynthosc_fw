@@ -112,24 +112,4 @@ Expected outputs:
 1. Activate the correct virtual environment.
 2. Build `app` for board `asynthosc` from the workspace root.
 3. Flash and validate serial logs/UI behavior.
-4. Run Twister tests for app and TinyOSC library.
-5. Regenerate docs after API or architecture changes.
 
-## Active Carryover Session
-
-- Topic: Network interface and OSC over UDP implementation.
-- Repo memory summary: `/memories/repo/osc-udp-project-status.md`.
-- Current blocking items:
-	- Add `#include <stdint.h>` in `include/app/lib/tinyosc.h`.
-	- Enable networking options in `app/prj.conf`.
-	- Replace OSC send stubs in `app/src/main.c` with live transport calls.
-- Requested default network values:
-	- Local IP: `192.168.1.42`
-	- Target IP: `192.168.1.142`
-	- Oport (TX): `12100`
-	- Iport (RX): `9100`
-
-## Notes
-
-- A few documentation files still use placeholder naming such as "Example Application" in `doc/conf.py` and `doc/Doxyfile`.
-- If you want, these can be aligned to AsynthOsc naming in a follow-up cleanup pass.
