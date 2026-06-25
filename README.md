@@ -13,6 +13,10 @@ The [manifest](west.yml) is used the select the compatible Zephyr version.
 Note: do not "git clone" this project, see installation instructions to run
 "west init" in order to initialize the project.
 
+## Features
+The features of this firmware are documented here :
+[https://everedero.github.io/asynth2osc/]: https://everedero.github.io/asynth2osc/
+
 ## Session guide
 
 For a single-entry startup document with quick commands and a full documentation
